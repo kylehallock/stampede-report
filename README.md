@@ -48,3 +48,4 @@ The workflow runs automatically every Monday at 7 AM UTC, or can be triggered ma
 - `ANTHROPIC_API_KEY`
 - `DRIVE_FOLDER_ID`
 - `REPORTS_FOLDER_ID`
+
