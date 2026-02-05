@@ -1,0 +1,8 @@
+anthropic
+google-api-python-client
+google-auth
+matplotlib
+numpy
+pydantic
+python-docx
+python-dotenv

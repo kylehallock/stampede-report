@@ -1,0 +1,67 @@
+name: Weekly Stampede Report
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'  # Every Monday at 7 AM UTC
+  workflow_dispatch:       # Manual trigger button
+    inputs:
+      days_back:
+        description: 'Number of days to look back for data'
+        required: false
+        default: '7'
+      mode:
+        description: 'Run mode'
+        required: false
+        default: 'weekly'
+        type: choice
+        options:
+          - weekly
+          - bootstrap
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Bootstrap (one-time)
+        if: ${{ github.event.inputs.mode == 'bootstrap' }}
+        run: python -m src.bootstrap.knowledge_builder
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+
+      - name: Commit bootstrap data
+        if: ${{ github.event.inputs.mode == 'bootstrap' }}
+        run: |
+          git config user.name "Stampede Report Bot"
+          git config user.email "bot@stampede-report"
+          git add data/institutional_knowledge/
+          git diff --cached --quiet || git commit -m "Bootstrap: update institutional knowledge"
+          git push
+
+      - name: Generate Weekly Report
+        if: ${{ github.event.inputs.mode != 'bootstrap' }}
+        run: python -m src.main --days=${{ github.event.inputs.days_back || '7' }}
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          REPORTS_FOLDER_ID: ${{ secrets.REPORTS_FOLDER_ID }}
+
+      - name: Commit cumulative learnings
+        if: ${{ github.event.inputs.mode != 'bootstrap' }}
+        run: |
+          git config user.name "Stampede Report Bot"
+          git config user.email "bot@stampede-report"
+          git add data/cumulative_learnings.json
+          git diff --cached --quiet || git commit -m "Weekly: update cumulative learnings"
+          git push
