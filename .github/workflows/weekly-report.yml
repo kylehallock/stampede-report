@@ -17,6 +17,15 @@ on:
         options:
           - weekly
           - bootstrap
+      folder_id:
+        description: 'Override Drive folder ID (for targeting specific folders)'
+        required: false
+        default: ''
+      all_files:
+        description: 'Process ALL files in folder (for historical data)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   generate-report:
@@ -50,7 +59,16 @@ jobs:
 
       - name: Generate Weekly Report
         if: ${{ github.event.inputs.mode != 'bootstrap' }}
-        run: python -m src.main --days=${{ github.event.inputs.days_back || '7' }}
+        run: |
+          ARGS="--days=${{ github.event.inputs.days_back || '7' }}"
+          if [ -n "${{ github.event.inputs.folder_id }}" ]; then
+            ARGS="$ARGS --folder=${{ github.event.inputs.folder_id }}"
+          fi
+          if [ "${{ github.event.inputs.all_files }}" = "true" ]; then
+            ARGS="$ARGS --all"
+          fi
+          echo "Running: python -m src.main $ARGS"
+          python -m src.main $ARGS
         env:
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
