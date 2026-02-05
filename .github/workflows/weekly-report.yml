@@ -26,6 +26,10 @@ on:
         required: false
         type: boolean
         default: false
+      half:
+        description: 'Half-year period for bootstrap (e.g., H1_2022)'
+        required: false
+        default: ''
 
 jobs:
   generate-report:
@@ -40,8 +44,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Bootstrap (one-time)
-        if: ${{ github.event.inputs.mode == 'bootstrap' }}
+      - name: Run Bootstrap (single half-year)
+        if: ${{ github.event.inputs.mode == 'bootstrap' && github.event.inputs.half != '' }}
+        run: |
+          python -m src.bootstrap.knowledge_builder \
+            --half=${{ github.event.inputs.half }} \
+            --folder=${{ github.event.inputs.folder_id }}
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Run Bootstrap (full - legacy)
+        if: ${{ github.event.inputs.mode == 'bootstrap' && github.event.inputs.half == '' }}
         run: python -m src.bootstrap.knowledge_builder
         env:
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
@@ -54,7 +68,7 @@ jobs:
           git config user.name "Stampede Report Bot"
           git config user.email "bot@stampede-report"
           git add data/institutional_knowledge/
-          git diff --cached --quiet || git commit -m "Bootstrap: update institutional knowledge"
+          git diff --cached --quiet || git commit -m "Bootstrap ${{ github.event.inputs.half || 'full' }}: add draft summary"
           git push
 
       - name: Generate Weekly Report

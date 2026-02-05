@@ -373,14 +373,229 @@ class KnowledgeBuilder:
         logger.info("Saved project_arc.json")
 
 
+def process_single_half(
+    half: str,
+    folder_id: str,
+    output_dir: Optional[Path] = None,
+) -> Path:
+    """Process a single half-year period and save draft for review.
+
+    Args:
+        half: Period name (e.g., "H1_2022")
+        folder_id: Google Drive folder ID containing the data
+        output_dir: Output directory (defaults to KNOWLEDGE_DIR)
+
+    Returns:
+        Path to the generated draft markdown file.
+    """
+    output_dir = output_dir or KNOWLEDGE_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find the period config
+    period_config = None
+    for period, start_str, end_str in HALF_YEAR_PERIODS:
+        if period == half:
+            period_config = (period, start_str, end_str)
+            break
+
+    if not period_config:
+        raise ValueError(f"Unknown half-year period: {half}. Valid options: {[p[0] for p in HALF_YEAR_PERIODS]}")
+
+    period, start_str, end_str = period_config
+
+    logger.info(f"=== Processing {period} ({start_str} to {end_str}) ===")
+    logger.info(f"Folder ID: {folder_id}")
+
+    # Initialize clients
+    drive = DriveClient()
+    claude = ClaudeClient()
+    sheets_reader = SheetsReader(drive.sheets)
+    docs_reader = DocsReader(drive.docs)
+
+    # Load any previous summaries for context
+    previous_summaries = []
+    for prev_period, _, _ in HALF_YEAR_PERIODS:
+        if prev_period == period:
+            break
+        prev_path = output_dir / f"{prev_period}.md"
+        if prev_path.exists():
+            prev_content = prev_path.read_text(encoding="utf-8")
+            previous_summaries.append(f"### {prev_period}\n{prev_content}")
+            logger.info(f"  Loaded previous summary: {prev_period}")
+
+    # Discover files in the folder (all files, not filtered by date)
+    logger.info("Discovering files in folder...")
+    all_spreadsheets = drive.list_files_in_folder(folder_id, mime_type=MIME_SPREADSHEET)
+    all_documents = drive.list_files_in_folder(folder_id, mime_type=MIME_DOCUMENT)
+    logger.info(f"  Found {len(all_spreadsheets)} spreadsheets")
+    logger.info(f"  Found {len(all_documents)} documents")
+
+    # Parse experiment sheets
+    logger.info("Parsing experiment sheets...")
+    experiments_text = []
+    for i, sheet_file in enumerate(all_spreadsheets):
+        name = sheet_file.get("name", "")
+        if "goal" in name.lower():
+            continue
+        try:
+            grid = sheets_reader.read_sheet(sheet_file["id"])
+            exp = parse_experiment_grid(grid, name)
+            text = experiment_to_summary_text(exp)
+            experiments_text.append(text)
+            logger.info(f"  [{i+1}/{len(all_spreadsheets)}] Parsed: {name}")
+        except Exception as e:
+            logger.warning(f"  [{i+1}/{len(all_spreadsheets)}] Failed: {name} - {e}")
+
+    logger.info(f"  Successfully parsed {len(experiments_text)} experiments")
+
+    # Batch-analyze experiments with Claude
+    logger.info("Analyzing experiments with Claude...")
+    batch_summaries = []
+    batch_size = EXPERIMENT_BATCH_SIZE
+    for i in range(0, len(experiments_text), batch_size):
+        batch = experiments_text[i:i + batch_size]
+        batch_num = i // batch_size + 1
+        total_batches = (len(experiments_text) + batch_size - 1) // batch_size
+        logger.info(f"  Processing batch {batch_num}/{total_batches} ({len(batch)} experiments)")
+
+        batch_data = "\n\n---\n\n".join(batch)
+        prompt = EXPERIMENT_BATCH_PROMPT.format(experiment_data=batch_data)
+
+        try:
+            summary = claude.send_message(prompt, max_tokens=4096)
+            batch_summaries.append(summary)
+        except Exception as e:
+            logger.error(f"  Batch {batch_num} failed: {e}")
+
+    experiment_analysis = "\n\n---\n\n".join(batch_summaries) if batch_summaries else "No experiment data found."
+
+    # Parse and analyze documents
+    logger.info("Parsing and analyzing documents...")
+    doc_texts = []
+    for i, doc_file in enumerate(all_documents):
+        name = doc_file.get("name", "")
+        try:
+            text = docs_reader.read_document_text(doc_file["id"])
+            doc_texts.append(f"### {name}\n{text}")
+            logger.info(f"  [{i+1}/{len(all_documents)}] Read: {name}")
+        except Exception as e:
+            logger.warning(f"  [{i+1}/{len(all_documents)}] Failed: {name} - {e}")
+
+    if doc_texts:
+        combined_docs = "\n\n---\n\n".join(doc_texts)
+        if len(combined_docs) > 100000:
+            combined_docs = combined_docs[:100000] + "\n\n[... truncated ...]"
+
+        prompt = JOURNAL_INSIGHTS_PROMPT.format(journal_text=combined_docs)
+        try:
+            journal_analysis = claude.send_message(prompt, max_tokens=4096)
+        except Exception as e:
+            logger.error(f"Journal analysis failed: {e}")
+            journal_analysis = "Failed to analyze documents."
+    else:
+        journal_analysis = "No documents found."
+
+    # Generate half-year summary
+    logger.info("Generating half-year summary...")
+    prev_text = "\n\n".join(previous_summaries) if previous_summaries else "None (this is the first period)"
+
+    prompt = HALF_YEAR_SUMMARY_PROMPT.format(
+        previous_summaries=prev_text,
+        experiment_summaries=experiment_analysis,
+        journal_insights=journal_analysis,
+        period=period,
+        start_date=start_str,
+        end_date=end_str,
+    )
+
+    try:
+        summary = claude.send_message(prompt, max_tokens=4096)
+    except Exception as e:
+        logger.error(f"Summary generation failed: {e}")
+        summary = f"Failed to generate summary: {e}"
+
+    # Save as draft markdown for review
+    draft_path = output_dir / f"{period}_DRAFT.md"
+    draft_content = f"""# {period} Summary (DRAFT)
+
+**Period**: {start_str} to {end_str}
+**Spreadsheets processed**: {len(experiments_text)}
+**Documents processed**: {len(doc_texts)}
+**Generated**: {datetime.now().isoformat()}
+
+---
+
+## Summary
+
+{summary}
+
+---
+
+## Raw Experiment Analysis
+
+{experiment_analysis}
+
+---
+
+## Raw Journal Analysis
+
+{journal_analysis}
+
+---
+
+**REVIEW INSTRUCTIONS**:
+1. Review the summary above for accuracy
+2. Edit as needed
+3. When satisfied, rename this file from `{period}_DRAFT.md` to `{period}.md`
+4. Commit and push, then proceed to the next half-year period
+"""
+
+    draft_path.write_text(draft_content, encoding="utf-8")
+    logger.info(f"Saved draft to: {draft_path}")
+
+    return draft_path
+
+
 def main():
     """Entry point for bootstrap."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    builder = KnowledgeBuilder()
-    builder.run()
+
+    # Parse arguments
+    half = None
+    folder_id = None
+
+    for arg in sys.argv[1:]:
+        if arg.startswith("--half="):
+            half = arg.split("=")[1]
+        elif arg.startswith("--folder="):
+            folder_id = arg.split("=")[1]
+
+    if half and folder_id:
+        # Single half-year mode
+        draft_path = process_single_half(half, folder_id)
+        print(f"\n{'='*60}")
+        print(f"DRAFT SAVED: {draft_path}")
+        print(f"{'='*60}")
+        print("\nNext steps:")
+        print("1. Review the draft file for accuracy")
+        print("2. Edit as needed")
+        print(f"3. Rename from {half}_DRAFT.md to {half}.md")
+        print("4. Commit and push")
+        print("5. Run the next half-year period")
+    elif half or folder_id:
+        print("Error: Both --half and --folder are required for single-half mode")
+        print("Usage: python -m src.bootstrap.knowledge_builder --half=H1_2022 --folder=FOLDER_ID")
+        print("\nAvailable periods:")
+        for period, start, end in HALF_YEAR_PERIODS:
+            print(f"  {period}: {start} to {end}")
+        sys.exit(1)
+    else:
+        # Full bootstrap mode (legacy)
+        builder = KnowledgeBuilder()
+        builder.run()
 
 
 if __name__ == "__main__":
