@@ -48,30 +48,13 @@ def create_weekly_report(
         URL of the created presentation.
     """
     slides_service = drive_client.slides
-    drive_service = drive_client.drive
 
     title = f"Stampede Weekly Report - {week_start.strftime('%b %d')} to {week_end.strftime('%b %d, %Y')}"
 
-    # Create a new presentation
-    presentation = slides_service.presentations().create(
-        body={"title": title}
-    ).execute()
-    presentation_id = presentation["presentationId"]
-
-    # Move to reports folder
-    try:
-        file = drive_service.files().get(
-            fileId=presentation_id, fields="parents"
-        ).execute()
-        previous_parents = ",".join(file.get("parents", []))
-        drive_service.files().update(
-            fileId=presentation_id,
-            addParents=reports_folder_id,
-            removeParents=previous_parents,
-            fields="id, parents",
-        ).execute()
-    except Exception as e:
-        logger.warning(f"Could not move presentation to reports folder: {e}")
+    # Create presentation directly in the reports folder (avoids move permission issues)
+    presentation_id, presentation = drive_client.create_presentation_in_folder(
+        title, reports_folder_id
+    )
 
     # Build all slides
     requests = []
@@ -133,7 +116,7 @@ def create_weekly_report(
         ).execute()
 
     # Upload chart images to slides
-    _add_chart_images(drive_client, presentation_id, chart_paths)
+    _add_chart_images(drive_client, presentation_id, chart_paths, reports_folder_id)
 
     url = f"https://docs.google.com/presentation/d/{presentation_id}"
     logger.info(f"Created report: {url}")
@@ -222,6 +205,7 @@ def _add_chart_images(
     drive_client: DriveClient,
     presentation_id: str,
     chart_paths: list[Path],
+    reports_folder_id: str,
 ) -> None:
     """Upload chart images and add them as slides."""
     slides_service = drive_client.slides
@@ -230,11 +214,11 @@ def _add_chart_images(
         if not chart_path.exists():
             continue
 
-        # Upload image to Drive (temporarily)
+        # Upload image to reports folder
         try:
             image_id = drive_client.upload_file(
                 str(chart_path),
-                folder_id="root",  # temp location
+                folder_id=reports_folder_id,
                 mime_type="image/png",
                 name=f"stampede_chart_{chart_path.stem}.png",
             )
@@ -243,6 +227,7 @@ def _add_chart_images(
             drive_client.drive.permissions().create(
                 fileId=image_id,
                 body={"type": "anyone", "role": "reader"},
+                supportsAllDrives=True,
             ).execute()
 
             image_url = f"https://drive.google.com/uc?id={image_id}"

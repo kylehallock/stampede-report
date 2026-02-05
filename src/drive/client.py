@@ -41,6 +41,15 @@ class DriveClient:
         self._docs_service = build("docs", "v1", credentials=self._credentials)
         self._slides_service = build("slides", "v1", credentials=self._credentials)
 
+    def _is_shared_drive(self, folder_id: str) -> bool:
+        """Check if a folder ID is a Shared Drive (Team Drive)."""
+        try:
+            # Try to get it as a shared drive
+            self._drive_service.drives().get(driveId=folder_id).execute()
+            return True
+        except Exception:
+            return False
+
     @property
     def credentials(self):
         return self._credentials
@@ -70,7 +79,7 @@ class DriveClient:
         """List all files in a Drive folder.
 
         Args:
-            folder_id: Google Drive folder ID.
+            folder_id: Google Drive folder ID (supports Shared Drives).
             mime_type: Optional MIME type filter.
             recursive: Whether to recurse into subfolders.
 
@@ -78,7 +87,8 @@ class DriveClient:
             List of file metadata dicts with id, name, mimeType, modifiedTime.
         """
         all_files = []
-        self._list_files_recursive(folder_id, mime_type, recursive, all_files)
+        is_shared_drive = self._is_shared_drive(folder_id)
+        self._list_files_recursive(folder_id, mime_type, recursive, all_files, is_shared_drive, folder_id if is_shared_drive else None)
         return all_files
 
     def _list_files_recursive(
@@ -87,6 +97,8 @@ class DriveClient:
         mime_type: Optional[str],
         recursive: bool,
         results: list[dict],
+        is_shared_drive: bool = False,
+        drive_id: Optional[str] = None,
     ) -> None:
         """Recursively list files in a folder."""
         query_parts = [f"'{folder_id}' in parents", "trashed = false"]
@@ -97,17 +109,22 @@ class DriveClient:
         page_token = None
 
         while True:
-            response = (
-                self._drive_service.files()
-                .list(
-                    q=query,
-                    spaces="drive",
-                    fields="nextPageToken, files(id, name, mimeType, modifiedTime, createdTime)",
-                    pageToken=page_token,
-                    pageSize=100,
-                )
-                .execute()
-            )
+            list_params = {
+                "q": query,
+                "fields": "nextPageToken, files(id, name, mimeType, modifiedTime, createdTime)",
+                "pageToken": page_token,
+                "pageSize": 100,
+                "supportsAllDrives": True,
+                "includeItemsFromAllDrives": True,
+            }
+            # For Shared Drives, use corpora='drive' with driveId
+            if is_shared_drive and drive_id:
+                list_params["corpora"] = "drive"
+                list_params["driveId"] = drive_id
+            else:
+                list_params["spaces"] = "drive"
+
+            response = self._drive_service.files().list(**list_params).execute()
 
             files = response.get("files", [])
             results.extend(files)
@@ -124,21 +141,25 @@ class DriveClient:
             )
             page_token = None
             while True:
-                response = (
-                    self._drive_service.files()
-                    .list(
-                        q=folder_query,
-                        spaces="drive",
-                        fields="nextPageToken, files(id, name)",
-                        pageToken=page_token,
-                        pageSize=100,
-                    )
-                    .execute()
-                )
+                list_params = {
+                    "q": folder_query,
+                    "fields": "nextPageToken, files(id, name)",
+                    "pageToken": page_token,
+                    "pageSize": 100,
+                    "supportsAllDrives": True,
+                    "includeItemsFromAllDrives": True,
+                }
+                if is_shared_drive and drive_id:
+                    list_params["corpora"] = "drive"
+                    list_params["driveId"] = drive_id
+                else:
+                    list_params["spaces"] = "drive"
+
+                response = self._drive_service.files().list(**list_params).execute()
                 folders = response.get("files", [])
                 for folder in folders:
                     self._list_files_recursive(
-                        folder["id"], mime_type, recursive, results
+                        folder["id"], mime_type, recursive, results, is_shared_drive, drive_id
                     )
                 page_token = response.get("nextPageToken")
                 if not page_token:
@@ -199,7 +220,7 @@ class DriveClient:
 
         Args:
             file_path: Local file path.
-            folder_id: Destination folder ID.
+            folder_id: Destination folder ID (supports Shared Drives).
             mime_type: MIME type of the file.
             name: Optional name override.
 
@@ -215,7 +236,57 @@ class DriveClient:
         media = MediaFileUpload(file_path, mimetype=mime_type)
         file = (
             self._drive_service.files()
-            .create(body=file_metadata, media_body=media, fields="id")
+            .create(
+                body=file_metadata,
+                media_body=media,
+                fields="id",
+                supportsAllDrives=True,
+            )
             .execute()
         )
         return file.get("id", "")
+
+    def create_presentation_in_folder(
+        self,
+        title: str,
+        folder_id: str,
+    ) -> tuple[str, dict]:
+        """Create a Google Slides presentation directly in a folder.
+
+        For Shared Drives, creates the file with the folder as parent.
+        This avoids permission issues with move operations.
+
+        Args:
+            title: Presentation title.
+            folder_id: Destination folder ID.
+
+        Returns:
+            Tuple of (presentation_id, presentation_object).
+        """
+        # Create file metadata with target folder as parent
+        file_metadata = {
+            "name": title,
+            "mimeType": MIME_PRESENTATION,
+            "parents": [folder_id],
+        }
+
+        # Create the file using Drive API (not Slides API) to set parent
+        file = (
+            self._drive_service.files()
+            .create(
+                body=file_metadata,
+                fields="id",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        presentation_id = file["id"]
+
+        # Get the full presentation object via Slides API
+        presentation = (
+            self._slides_service.presentations()
+            .get(presentationId=presentation_id)
+            .execute()
+        )
+
+        return presentation_id, presentation
