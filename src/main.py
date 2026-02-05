@@ -48,6 +48,7 @@ def run_weekly_pipeline(
     folder_id: Optional[str] = None,
     reports_folder_id: Optional[str] = None,
     dry_run: bool = False,
+    all_files: bool = False,
 ) -> Optional[str]:
     """Run the full weekly report pipeline.
 
@@ -56,6 +57,7 @@ def run_weekly_pipeline(
         folder_id: Google Drive folder ID (defaults to config).
         reports_folder_id: Output folder ID (defaults to config).
         dry_run: If True, skip Slides generation and just print analysis.
+        all_files: If True, process all files in folder (for historical data).
 
     Returns:
         URL of the generated Slides report, or None if dry_run.
@@ -79,18 +81,25 @@ def run_weekly_pipeline(
     week_end = today
     week_start = today - timedelta(days=days_back)
 
-    logger.info(f"Analyzing period: {week_start} to {week_end}")
+    if all_files:
+        logger.info(f"Processing ALL files in folder: {folder_id}")
+    else:
+        logger.info(f"Analyzing period: {week_start} to {week_end}")
 
     # === Stage 0: Data Ingestion ===
     logger.info("Stage 0: Ingesting data from Google Drive...")
 
-    # Discover recent experiment sheets
-    recent_sheets = drive.list_recent_files(folder_id, days=days_back, mime_type=MIME_SPREADSHEET)
-    logger.info(f"  Found {len(recent_sheets)} recent spreadsheets")
-
-    # Discover recent documents (journals, meeting minutes)
-    recent_docs = drive.list_recent_files(folder_id, days=days_back, mime_type=MIME_DOCUMENT)
-    logger.info(f"  Found {len(recent_docs)} recent documents")
+    # Discover experiment sheets (all files or recent only)
+    if all_files:
+        recent_sheets = drive.list_files_in_folder(folder_id, mime_type=MIME_SPREADSHEET)
+        logger.info(f"  Found {len(recent_sheets)} spreadsheets")
+        recent_docs = drive.list_files_in_folder(folder_id, mime_type=MIME_DOCUMENT)
+        logger.info(f"  Found {len(recent_docs)} documents")
+    else:
+        recent_sheets = drive.list_recent_files(folder_id, days=days_back, mime_type=MIME_SPREADSHEET)
+        logger.info(f"  Found {len(recent_sheets)} recent spreadsheets")
+        recent_docs = drive.list_recent_files(folder_id, days=days_back, mime_type=MIME_DOCUMENT)
+        logger.info(f"  Found {len(recent_docs)} recent documents")
 
     # Parse experiment sheets
     experiments: list[Experiment] = []
@@ -116,12 +125,16 @@ def run_weekly_pipeline(
         try:
             text = docs_reader.read_document_text(doc_file["id"])
             entries = parse_journal_text(text, name)
-            # Filter to this week's entries
-            week_entries = [
-                e for e in entries
-                if e.entry_date is not None and week_start <= e.entry_date <= week_end
-            ]
-            journal_entries.extend(week_entries)
+            if all_files:
+                # For historical data, include all entries
+                journal_entries.extend(entries)
+            else:
+                # Filter to this week's entries
+                week_entries = [
+                    e for e in entries
+                    if e.entry_date is not None and week_start <= e.entry_date <= week_end
+                ]
+                journal_entries.extend(week_entries)
         except Exception as e:
             logger.warning(f"  Failed to parse doc '{name}': {e}")
 
@@ -211,18 +224,29 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    # Check for dry-run flag
+    # Parse command line arguments
     dry_run = "--dry-run" in sys.argv
+    all_files = "--all" in sys.argv  # Process all files, not just recent
+
     if dry_run:
         logger.info("Running in dry-run mode (no Slides output)")
 
     # Check for custom days-back
     days_back = 7
+    folder_id = None
+
     for arg in sys.argv[1:]:
         if arg.startswith("--days="):
             days_back = int(arg.split("=")[1])
+        elif arg.startswith("--folder="):
+            folder_id = arg.split("=")[1]
 
-    url = run_weekly_pipeline(days_back=days_back, dry_run=dry_run)
+    url = run_weekly_pipeline(
+        days_back=days_back,
+        folder_id=folder_id,
+        dry_run=dry_run,
+        all_files=all_files,
+    )
     if url:
         print(f"\nReport URL: {url}")
 
