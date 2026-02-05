@@ -173,8 +173,11 @@ class DriveClient:
     ) -> list[dict]:
         """List files modified in the last N days.
 
+        Uses direct API query with modifiedTime filter for efficiency.
+        Much faster than recursive traversal for large Shared Drives.
+
         Args:
-            folder_id: Google Drive folder ID.
+            folder_id: Google Drive folder ID or Shared Drive ID.
             days: Number of days to look back.
             mime_type: Optional MIME type filter.
 
@@ -184,14 +187,41 @@ class DriveClient:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
 
-        all_files = self.list_files_in_folder(folder_id, mime_type)
-        recent = []
-        for f in all_files:
-            mod_time = f.get("modifiedTime", "")
-            if mod_time and mod_time >= cutoff_str:
-                recent.append(f)
+        # Build query with modification time filter
+        query_parts = [f"modifiedTime > '{cutoff_str}'", "trashed = false"]
+        if mime_type:
+            query_parts.append(f"mimeType = '{mime_type}'")
+        query = " and ".join(query_parts)
 
-        return recent
+        is_shared_drive = self._is_shared_drive(folder_id)
+        results = []
+        page_token = None
+
+        while True:
+            list_params = {
+                "q": query,
+                "fields": "nextPageToken, files(id, name, mimeType, modifiedTime, createdTime)",
+                "pageToken": page_token,
+                "pageSize": 100,
+                "supportsAllDrives": True,
+                "includeItemsFromAllDrives": True,
+            }
+
+            if is_shared_drive:
+                list_params["corpora"] = "drive"
+                list_params["driveId"] = folder_id
+            else:
+                list_params["spaces"] = "drive"
+
+            response = self._drive_service.files().list(**list_params).execute()
+            files = response.get("files", [])
+            results.extend(files)
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+        return results
 
     def list_spreadsheets(self, folder_id: str) -> list[dict]:
         """List all Google Sheets in a folder."""
